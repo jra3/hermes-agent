@@ -10,6 +10,7 @@ Environment variables:
     EMAIL_SMTP_HOST     — SMTP server host (e.g., smtp.gmail.com)
     EMAIL_SMTP_PORT     — SMTP server port (default: 587)
     EMAIL_ADDRESS       — Email address for the agent
+    EMAIL_FROM_NAME     — Optional display name for the From: header
     EMAIL_PASSWORD      — Email password or app-specific password
     EMAIL_POLL_INTERVAL — Seconds between mailbox checks (default: 15)
     EMAIL_ALLOWED_USERS — Comma-separated list of allowed sender addresses
@@ -33,7 +34,7 @@ from email.header import decode_header
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
-from email.utils import formatdate
+from email.utils import formataddr, formatdate
 from email import encoders
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -89,6 +90,28 @@ def _esecret_int(name: str, default: int) -> int:
 def _esecret_bool(name: str, default: bool = False) -> bool:
     """Scope-aware boolean read (``env_bool`` variant of ``_get_esecret``)."""
     return is_truthy_value(_get_esecret(name, ""), default=default)
+
+
+def validate_config(config) -> bool:
+    """Reject an EMAIL_FROM_NAME / from_name value carrying a line break."""
+    extra = getattr(config, "extra", {}) or {}
+    name = _get_secret("EMAIL_FROM_NAME", "") or extra.get("from_name", "")
+    return "\n" not in name and "\r" not in name
+
+
+def _from_header(address: str, display_name: str = "") -> str:
+    """``Name <addr>`` via formataddr (RFC 2047-encodes non-ASCII), or the
+    bare address when no display name is configured. Raises ValueError on a
+    line break in the name — formataddr would copy it into the header."""
+    display_name = display_name.strip()
+    if not display_name:
+        return address
+    if "\n" in display_name or "\r" in display_name:
+        raise ValueError(
+            "email display name must be a single line, got "
+            f"{display_name!r} (EMAIL_FROM_NAME / platforms.email.from_name)"
+        )
+    return formataddr((display_name, address))
 
 
 # Automated sender patterns — emails from these are silently ignored
@@ -551,6 +574,7 @@ class EmailAdapter(BasePlatformAdapter):
         # instead of an obvious "host not set" error.
         extra = config.extra or {}
         self._address = (_get_secret("EMAIL_ADDRESS", "") or extra.get("address", "")).strip()
+        self._from_name = (_get_secret("EMAIL_FROM_NAME", "") or extra.get("from_name", "")).strip()
         self._password = _get_secret("EMAIL_PASSWORD", "")
         self._imap_host = (_get_secret("EMAIL_IMAP_HOST", "") or extra.get("imap_host", "")).strip()
         self._imap_port = _esecret_int("EMAIL_IMAP_PORT", 993)
@@ -1165,7 +1189,7 @@ class EmailAdapter(BasePlatformAdapter):
     ) -> str:
         """Send an email via SMTP. Runs in executor thread."""
         msg = MIMEMultipart()
-        msg["From"] = self._address
+        msg["From"] = _from_header(self._address, self._from_name)
         msg["To"] = to_addr
 
         # Thread context for reply
@@ -1280,7 +1304,7 @@ class EmailAdapter(BasePlatformAdapter):
     ) -> str:
         """Send an email with multiple file attachments via SMTP."""
         msg = MIMEMultipart()
-        msg["From"] = self._address
+        msg["From"] = _from_header(self._address, self._from_name)
         msg["To"] = to_addr
 
         ctx = self._thread_context.get(to_addr, {})
@@ -1360,7 +1384,7 @@ class EmailAdapter(BasePlatformAdapter):
     ) -> str:
         """Send an email with a file attachment via SMTP."""
         msg = MIMEMultipart()
-        msg["From"] = self._address
+        msg["From"] = _from_header(self._address, self._from_name)
         msg["To"] = to_addr
 
         ctx = self._thread_context.get(to_addr, {})
@@ -1444,6 +1468,7 @@ async def _standalone_send(
 
     extra = getattr(pconfig, "extra", {}) or {}
     address = extra.get("address") or _get_secret("EMAIL_ADDRESS", "")
+    from_name = _get_secret("EMAIL_FROM_NAME", "") or extra.get("from_name", "")
     password = _get_secret("EMAIL_PASSWORD", "")
     smtp_host = extra.get("smtp_host") or _get_secret("EMAIL_SMTP_HOST", "")
     try:
@@ -1456,7 +1481,7 @@ async def _standalone_send(
 
     try:
         msg = MIMEText(message, "plain", "utf-8")
-        msg["From"] = address
+        msg["From"] = _from_header(address, from_name)
         msg["To"] = chat_id
         msg["Subject"] = "Hermes Agent"
         msg["Date"] = formatdate(localtime=True)
@@ -1499,6 +1524,7 @@ def register(ctx) -> None:
         adapter_factory=_build_adapter,
         check_fn=check_email_requirements,
         is_connected=_is_connected,
+        validate_config=validate_config,
         required_env=["EMAIL_ADDRESS", "EMAIL_PASSWORD", "EMAIL_SMTP_HOST"],
         install_hint="Email uses the Python stdlib (smtplib/imaplib) — no extra deps",
         allowed_users_env="EMAIL_ALLOWED_USERS",

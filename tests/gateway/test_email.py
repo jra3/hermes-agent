@@ -1122,5 +1122,131 @@ class TestSenderAuthentication(unittest.TestCase):
         self.assertFalse(ok, reason)
 
 
+class TestFromDisplayName(unittest.TestCase):
+    """EMAIL_FROM_NAME / platforms.email.from_name → From: display name."""
+
+    def _make_adapter(self, extra_env=None):
+        from gateway.config import PlatformConfig
+        env = {
+            "EMAIL_ADDRESS": "hermes@test.com",
+            "EMAIL_PASSWORD": "secret",
+            "EMAIL_IMAP_HOST": "imap.test.com",
+            "EMAIL_SMTP_HOST": "smtp.test.com",
+        }
+        env.update(extra_env or {})
+        with patch.dict(os.environ, env):
+            from plugins.platforms.email.adapter import EmailAdapter
+            return EmailAdapter(PlatformConfig(enabled=True))
+
+    def _sent_from(self, adapter):
+        with patch("smtplib.SMTP") as mock_smtp:
+            mock_server = MagicMock()
+            mock_smtp.return_value = mock_server
+            adapter._send_email("user@test.com", "Hello")
+            return mock_server.send_message.call_args[0][0]["From"]
+
+    def test_no_name_bare_address(self):
+        """Default (unset) stays byte-for-byte the historical bare address."""
+        adapter = self._make_adapter()
+        self.assertEqual(self._sent_from(adapter), "hermes@test.com")
+
+    def test_env_display_name(self):
+        adapter = self._make_adapter({"EMAIL_FROM_NAME": "Hermes Agent"})
+        self.assertEqual(self._sent_from(adapter), "Hermes Agent <hermes@test.com>")
+
+    def test_config_extra_display_name(self):
+        """config.yaml platforms.email.from_name works without the env var."""
+        from gateway.config import PlatformConfig
+        with patch.dict(os.environ, {
+            "EMAIL_ADDRESS": "hermes@test.com",
+            "EMAIL_PASSWORD": "secret",
+            "EMAIL_IMAP_HOST": "imap.test.com",
+            "EMAIL_SMTP_HOST": "smtp.test.com",
+        }):
+            from plugins.platforms.email.adapter import EmailAdapter
+            adapter = EmailAdapter(PlatformConfig(
+                enabled=True, extra={"from_name": "Hermes Agent"},
+            ))
+        self.assertEqual(adapter._from_name, "Hermes Agent")
+        self.assertEqual(self._sent_from(adapter), "Hermes Agent <hermes@test.com>")
+
+    def test_blank_env_is_ignored(self):
+        """An empty/whitespace name falls back to the bare address."""
+        adapter = self._make_adapter({"EMAIL_FROM_NAME": "   "})
+        self.assertEqual(self._sent_from(adapter), "hermes@test.com")
+
+    def test_non_ascii_name_is_rfc2047_encoded(self):
+        adapter = self._make_adapter({"EMAIL_FROM_NAME": "Hermé Š Agent"})
+        sent = self._sent_from(adapter)
+        self.assertNotIn("Hermé", sent)          # raw non-ASCII must not appear
+        self.assertIn("=?utf-8?", sent)          # encoded-word instead
+        from email import message_from_string, policy
+        parsed = message_from_string(f"From: {sent}\n\n", policy=policy.default)
+        # Round-trips through a real client-side decode
+        self.assertEqual(parsed["From"].addresses[0].display_name, "Hermé Š Agent")
+
+    def test_from_header_helper(self):
+        """Unit-level: helper returns bare address / formatted pair."""
+        from plugins.platforms.email.adapter import _from_header
+        self.assertEqual(_from_header("a@b.com"), "a@b.com")
+        self.assertEqual(_from_header("a@b.com", ""), "a@b.com")
+        self.assertEqual(_from_header("a@b.com", "   "), "a@b.com")
+        self.assertEqual(_from_header("a@b.com", "X Y"), "X Y <a@b.com>")
+
+    def test_line_break_in_name_is_rejected(self):
+        """A line break in the name is an illegal value, not something to mangle.
+
+        formataddr would copy it into the header verbatim, so it raises instead.
+        """
+        from plugins.platforms.email.adapter import _from_header
+        for hostile in ("Bad\nX-Injected: 1", "Bad\r\nX-Injected: 1", "Bad\rX"):
+            with self.assertRaises(ValueError):
+                _from_header("a@b.com", hostile)
+
+    def test_validate_config_rejects_line_break(self):
+        """Registry-level gate: a bad name fails validation before construction."""
+        from gateway.config import PlatformConfig
+        from plugins.platforms.email.adapter import validate_config
+        self.assertFalse(validate_config(
+            PlatformConfig(enabled=True, extra={"from_name": "Hermes\nAgent"})))
+        self.assertTrue(validate_config(
+            PlatformConfig(enabled=True, extra={"from_name": "Hermes Agent"})))
+        self.assertTrue(validate_config(PlatformConfig(enabled=True)))
+
+    def _standalone_from(self, extra, env):
+        """Run _standalone_send against a mocked SMTP server; return its From:."""
+        import asyncio
+        from plugins.platforms.email.adapter import _standalone_send
+
+        class _PC:
+            pass
+        _PC.extra = extra
+
+        sent = {}
+        fake = MagicMock()
+        fake.send_message.side_effect = lambda m: sent.update(From=m["From"])
+        with patch("smtplib.SMTP", return_value=fake), \
+             patch.dict(os.environ, env):
+            result = asyncio.run(_standalone_send(_PC(), "user@test.com", "Hi"))
+        self.assertEqual(result.get("success"), True, result)
+        return sent["From"]
+
+    def test_standalone_send_uses_display_name(self):
+        """The out-of-process standalone path honours the name too."""
+        from_ = self._standalone_from(
+            {"address": "hermes@test.com", "smtp_host": "smtp.test.com",
+             "from_name": "Hermes Agent"},
+            {"EMAIL_PASSWORD": "secret", "EMAIL_FROM_NAME": ""},
+        )
+        self.assertEqual(from_, "Hermes Agent <hermes@test.com>")
+
+    def test_standalone_send_bare_without_name(self):
+        from_ = self._standalone_from(
+            {"address": "hermes@test.com", "smtp_host": "smtp.test.com"},
+            {"EMAIL_PASSWORD": "secret", "EMAIL_FROM_NAME": ""},
+        )
+        self.assertEqual(from_, "hermes@test.com")
+
+
 if __name__ == "__main__":
     unittest.main()

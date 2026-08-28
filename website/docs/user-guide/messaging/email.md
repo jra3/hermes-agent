@@ -75,11 +75,14 @@ EMAIL_SMTP_HOST=smtp.gmail.com
 EMAIL_ALLOWED_USERS=your@email.com,colleague@work.com
 
 # Optional
+EMAIL_FROM_NAME=Hermes                 # Display name in the From: header
 EMAIL_IMAP_PORT=993                    # Default: 993 (IMAP SSL)
 EMAIL_SMTP_PORT=587                    # Default: 587 (SMTP STARTTLS)
 EMAIL_POLL_INTERVAL=15                 # Seconds between inbox checks (default: 15)
 EMAIL_HOME_ADDRESS=your@email.com      # Default delivery target for cron jobs
 ```
+
+Set `EMAIL_FROM_NAME` to have outgoing mail arrive as `Hermes <hermes@gmail.com>` instead of the bare address — most clients (Gmail included) show the name in the sender list. Non-ASCII names are RFC 2047-encoded automatically. Without it the From: header is unchanged. `EMAIL_FROM_NAME` wins over a `from_name` key in `platforms.email.extra` when both are set.
 
 ---
 
@@ -193,6 +196,7 @@ Email access is stricter by default than chat-style platforms:
 | `EMAIL_IMAP_PORT` | No | `993` | IMAP server port |
 | `EMAIL_SMTP_PORT` | No | `587` | SMTP server port |
 | `EMAIL_POLL_INTERVAL` | No | `15` | Seconds between inbox checks |
+| `EMAIL_FROM_NAME` | No | — | Display name in the From: header |
 | `EMAIL_ALLOWED_USERS` | No | — | Comma-separated allowed sender addresses |
 | `EMAIL_HOME_ADDRESS` | No | — | Default delivery target for cron jobs |
 | `EMAIL_ALLOW_ALL_USERS` | No | `false` | Allow all senders (not recommended) |
