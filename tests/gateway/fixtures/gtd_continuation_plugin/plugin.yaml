@@ -1,0 +1,4 @@
+name: gtd-continuation
+version: 0.0.1
+description: "Proof plugin for jra3/gtdd#108: a continuation read and a guarded send on the API server, registered through ctx.register_platform_handler('api_server', ...)."
+author: "jra3 (proof, not for installation)"
